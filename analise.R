@@ -1,58 +1,63 @@
+library(glmnet)
+library(stats)
 library(tidyverse)
+library(magrittr)
 
 all_data = read_rds("clean_data.rds")
+trechos = read.csv("trechos.csv")
 
-summary = all_data %>%
-  filter((video %% 2) == 0,
-         video != 22) %>% 
-  group_by(rel_frame, video, channel) %>%
+# Função verifica intervalo do estimulo visual na função trechos
+estimulo = function(rel_frame, video) {
+  rel_frame >= trechos[video, 2] && rel_frame <= trechos[video, 3]
+}
+
+# Cria uma coluna chamada trecho no all_data atribuindo o retorno 
+# da função estimulo (1) calculada nos pontos rel_frame e video:
+# Obs: no filtro, no lugar de trecho == TRUE poderia colocar somente "trecho"
+# que já entenderia a condição booleana
+all_data %<>%
+  mutate(trecho = map2_lgl(rel_frame, video, estimulo)) %>% 
+  filter(trecho == TRUE) %>% 
+  select(-trecho) # retira a coluna trecho
+
+data_summary = all_data %>%
+  filter(!is.na(oxy) & !is.na(deoxy)) %>% 
+  group_by(patient, video, channel, quiz_grade) %>%
   summarise(oxy_m = mean(oxy, na.rm = TRUE),
             deoxy_m = mean(deoxy, na.rm = TRUE)
+  ) %>% 
+  ungroup() %>% 
+  mutate(patient = as.factor(patient),
+         channel = as.factor(channel),
+         video = as.factor(video)
   )
 
-# Gerando os gráficos de oxy:
-for(ii in 1:10)
-{
-  for(jj in 1:2)
-  {
-    all_data %>%
-      filter(video %% 2 == 0,
-             video <= jj*10,
-             video > (jj-1)*10,
-             channel == ii,
-             !is.na(oxy)) %>% 
-      ggplot(aes(x = rel_frame, y = oxy)) +
-      geom_line(aes(color = as.factor(patient))) +
-      geom_smooth() +
-      facet_wrap(~ video, ncol = 2)
-    ggsave(paste("./figuras/oxy_m-",
-                 ii, "-", jj, ".pdf", sep=""))
-  }
-}
+#Regressao Logistica
+XX = model.matrix(quiz_grade~., data_summary)
+YY = data_summary %>% ungroup() %>% select(quiz_grade) %>% as.matrix()
 
-# Gerando os gráficos de deoxy:
-for(ii in 1:10)
-{
-  for(jj in 1:2)
-  {
-    all_data %>%
-      filter(video %% 2 == 0,
-             video <= jj*10,
-             video > (jj-1)*10,
-             channel == ii,
-             !is.na(deoxy)) %>% 
-      ggplot(aes(x = rel_frame, y = deoxy)) +
-      geom_line(aes(color = as.factor(patient))) +
-      geom_smooth() +
-      facet_wrap(~ video, ncol = 2)
-    ggsave(paste("./figuras/deoxy_m-",
-                 ii, "-", jj, ".pdf", sep=""))
-  }
-}
+aux <- cv.glmnet(XX, YY, family = "binomial",
+                 keep = TRUE, nfolds=nrow(XX))
+i <- which(aux$lambda == aux$lambda.min)
+coefficients(aux, s = aux$lambda.min)
+  
 
-summary %>% 
-  ggplot(aes(x = rel_frame, y = oxy_m)) +
-  geom_line() + 
-  facet_grid(channel ~ video)
-ggsave("deoxy_m_1.pdf")
+install.packages("ROCR")
+library(ROCR)
 
+
+install.packages("ROCR")
+library(ROCR)
+
+roc <- prediction(aux$fit.preval[,i], data_summary$quiz_grade)
+roc <- performance(roc, measure = "tpr", x.measure = "fpr") 
+data_roc <- tibble("espec" = roc@x.values[[1]],
+                   "sens" = roc@y.values[[1]],
+                   "method"   = "GLMNET")
+
+g <- data_roc %>%
+  ggplot()+
+  geom_line(aes(x = espec, y = sens), size = 1.2)+
+  xlab("1-Specificity")+
+  ylab("Sensitivity")+
+  geom_abline(size = 1.2)
