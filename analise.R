@@ -1,4 +1,5 @@
 library(glmnet)
+library(ROCR)
 library(stats)
 library(tidyverse)
 library(magrittr)
@@ -42,13 +43,6 @@ i <- which(aux$lambda == aux$lambda.min)
 coefficients(aux, s = aux$lambda.min)
   
 
-install.packages("ROCR")
-library(ROCR)
-
-
-install.packages("ROCR")
-library(ROCR)
-
 roc <- prediction(aux$fit.preval[,i], data_summary$quiz_grade)
 roc <- performance(roc, measure = "tpr", x.measure = "fpr") 
 data_roc <- tibble("espec" = roc@x.values[[1]],
@@ -61,3 +55,4 @@ g <- data_roc %>%
   xlab("1-Specificity")+
   ylab("Sensitivity")+
   geom_abline(size = 1.2)
+ggsave("./figuras/ROC-regressao_medias.pdf", plot = g)
