@@ -3,6 +3,11 @@ library(ROCR)
 library(stats)
 library(tidyverse)
 library(magrittr)
+library(randomForest)
+
+###############################
+# Pre-processamento dos dados #
+###############################
 
 #all_data = read_rds("clean_data.rds")
 all_data = read_rds("clean_interpol_data.rds")
@@ -35,6 +40,80 @@ for(ii in unique(data_summary$channel))
                                    by = c("patient", "video")) 
 }
 
+# write_rds(data_summary_cols, "data_summary_cols.rds")
+
+data_summary_cols = read_rds("data_summary_cols.rds")
+
+
+##############################
+# Modelinhos                 #
+##############################
+data_roc_mean = tibble()
+
+
+###########
+# Exemplo - Implementando Arvore simples
+#########
+
+# Ajuste da arvore. Acertos em função de oxy_m_1: 
+ajuste = rpart(quiz_grade ~ oxy_m_1, data_summary_cols)
+
+# Identificando o nível da árvore com melhor erro de validação cruzada:
+melhor_nivel = which.min(ajuste$cptable[,"xerror"])
+
+# Identifica cp associado ao melhor nivel:
+cp = ajuste$cptable[melhor_nivel, "CP"]
+ajuste %<>% prune(cp)
+  
+# É possível verificar que uma arvore só com oxy_m1 não é possível ver nada =)
+# no ajuste o modelo escolhe somente a raiz (chutar acerto ou erro ao invés de usar a oxy)
+
+###########
+# Arvores #
+###########
+
+## Arvore com todo mundo
+# Ajuste da arvore. Acertos em função de oxy_m_1: 
+formula = quiz_grade~.
+ajuste_todos = data_summary_cols %>% 
+  select(-patient, -video) %>% 
+  rpart(formula, .)
+
+# Identificando o nível da árvore com melhor erro de validação cruzada:
+melhor_nivel = which.min(ajuste_todos$cptable[,"xerror"])
+
+# Identifica cp associado ao melhor nivel:
+cp = ajuste_todos$cptable[melhor_nivel, "CP"]
+
+ajuste_todos %<>% prune(cp) 
+roc <- prediction(predict(ajuste_todos),
+                  data_summary_cols$quiz_grade)
+performance(roc, measure = "auc")
+roc <- performance(roc, measure = "tpr", x.measure = "fpr")
+data_roc_mean_rpart <- tibble("espec" = roc@x.values[[1]],
+                              "sens" = roc@y.values[[1]],
+                              "method"   = "RPART")
+data_roc_mean %<>% rbind(data_roc_mean_rpart)
+
+######################
+# Floresta aleatoria #
+######################
+formula = quiz_grade~. 
+
+# Classificação usa fatores, regressão usa números reais, por isso
+# colocar em fator:
+ajuste = data_summary_cols %>%
+  mutate(quiz_grade = as.factor(quiz_grade)) %>% 
+  randomForest(formula, .)
+
+roc <- prediction(ajuste$votes[,2], data_summary_cols$quiz_grade)
+performance(roc, measure = "auc")
+roc <- performance(roc, measure = "tpr", x.measure = "fpr")
+data_roc_mean_rf <- tibble("espec" = roc@x.values[[1]],
+                           "sens" = roc@y.values[[1]],
+                           "method"   = "RF")
+data_roc_mean %<>% rbind(data_roc_mean_rf)
+
 #Regressao Logistica
 XX = model.matrix(quiz_grade~., data_summary_cols)
 YY = data_summary_cols %>% ungroup() %>% select(quiz_grade) %>% as.matrix()
@@ -47,15 +126,17 @@ coefficients(aux, s = aux$lambda.min)
 roc <- prediction(aux$fit.preval[,i], data_summary_cols$quiz_grade)
 performance(roc, measure = "auc")
 roc <- performance(roc, measure = "tpr", x.measure = "fpr")
-data_roc_mean <- tibble("espec" = roc@x.values[[1]],
-                   "sens" = roc@y.values[[1]],
-                   "method"   = "GLMNET")
+data_roc_mean_glm <- tibble("espec" = roc@x.values[[1]],
+                            "sens" = roc@y.values[[1]],
+                            "method"   = "GLMNET")
+data_roc_mean %<>% rbind(data_roc_mean_glm)
 
 gmean <- data_roc_mean %>%
   ggplot()+
-  geom_line(aes(x = espec, y = sens), size = 1.2)+
+  geom_line(aes(x = espec, y = sens, color = method),
+            size = 1.2)+
   xlab("1-Specificity")+
   ylab("Sensitivity")+
   geom_abline(size = 1.2)
-ggsave("./figuras/ROC-regressao_medias.pdf", plot = gmean)
+ggsave("./figuras/ROC_medias.pdf", plot = gmean)
 gmean
