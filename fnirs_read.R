@@ -2,6 +2,8 @@ library(R.matlab)
 library(tidyverse)
 library(magrittr)
 
+INTERPOLATE = TRUE
+
 triggers = read.csv("triggers.csv")
 triggers = triggers[, -1]
 triggers = triggers[,-ncol(triggers)]
@@ -25,9 +27,8 @@ generate_col_video = function(n_channel, n_frames, this_trigger)
   # do vídeo do qual faz parte:
   col_rel_frame = NULL 
 
-# Para cada trecho do vídeo, calcula a quantidade de frames do vídeo
-# subtraindo os triggers que dividem os trechos:
-  
+  # Para cada trecho do vídeo, calcula a quantidade de frames do vídeo
+  # subtraindo os triggers que dividem os trechos:
   for(ii in 1:n_videos) {
     # pega o comprimento de cada trecho:
     video_frames = as.numeric(this_trigger[ii+1] - this_trigger[ii])
@@ -41,11 +42,11 @@ generate_col_video = function(n_channel, n_frames, this_trigger)
   
   # Para o último trecho do vídeo, contando os frames:
   video_frames = as.numeric(n_frames - this_trigger[n_videos+1] + 1)
-  col_video = c(col_videos, rep(n_videos + 1, video_frames))
+  col_videos = c(col_videos, rep(n_videos + 1, video_frames))
   col_rel_frame = c(col_rel_frame, 1:video_frames)
   
   # Organiza as colunas no data frame:
-  tibble(video = rep(col_video, n_channel),
+  tibble(video = rep(col_videos, n_channel),
          rel_frame = rep(col_rel_frame, n_channel))
 }
 
@@ -83,7 +84,9 @@ all_data = NULL
 # Para cada paciente existente, transforma canal e sinais oxy e deoxy
 # em forma estruturada de acordo com a função clean_data
 for(patient in patients) {
-  oxy_path = paste("./Oxy/", patient, ".txt", sep = "")
+  print(patient)
+  oxy_dir = ifelse(INTERPOLATE, "./Oxy_interpol/", "./Oxy/")
+  oxy_path = paste(oxy_dir, patient, ".txt", sep = "")
   clean_oxy = NULL
   if(file.exists(oxy_path)) {
     signal = read.table(oxy_path)
@@ -98,7 +101,8 @@ for(patient in patients) {
   }
   
   clean_deoxy = NULL
-  deoxy_path = paste("./Deoxy/", patient, ".txt", sep = "")
+  deoxy_dir = ifelse(INTERPOLATE, "./Deoxy_interpol/", "./Deoxy/")
+  deoxy_path = paste(deoxy_dir, patient, ".txt", sep = "")
   if(file.exists(deoxy_path)) {
     signal = read.table(deoxy_path)
     clean_deoxy = clean_data(patient, signal)
@@ -145,12 +149,15 @@ clean_channel = function(patient, channel)
 # para cada linha (frame, canal) verifica se está ok e mantém
 # se o sinal for nulo ou ruim, marca como NA
 # all_data é atualizada com os dados de oxy e deoxy substituídos por NA 
-all_data %<>% 
-  mutate(good_channel = map2_int(patient, channel, clean_channel),
-         oxy = ifelse(good_channel, oxy, NA),
-         deoxy = ifelse(good_channel, deoxy, NA)
-  )
-
+if(!INTERPOLATE)
+{
+  all_data %<>% 
+    mutate(good_channel = map2_int(patient, channel, clean_channel),
+           oxy = ifelse(good_channel, oxy, NA),
+           deoxy = ifelse(good_channel, deoxy, NA)
+    )
+}
+    
 # Adiciona o resultado do quiz correspondente ao trecho do video:
 
 # Identifica quais questões estão corretas para cada trecho de video:
@@ -171,6 +178,23 @@ correct_quiz = function(patient, video)
 all_data %<>%
   mutate(quiz_grade = map2_int(patient, video, correct_quiz))
 
+# Manter apenas frames de trechos do video
+trechos = read.csv("trechos.csv")
+
+# Função verifica intervalo do estimulo visual na função trechos
+estimulo = function(rel_frame, video) {
+  rel_frame >= trechos[video, 2] && rel_frame <= trechos[video, 3]
+}
+
+# Cria uma coluna chamada trecho no all_data atribuindo o retorno 
+# da função estimulo (1) calculada nos pontos rel_frame e video:
+# Obs: no filtro, no lugar de trecho == TRUE poderia colocar somente "trecho"
+# que já entenderia a condição booleana
+all_data %<>%
+  mutate(trecho = map2_lgl(rel_frame, video, estimulo)) %>% 
+  filter(trecho == TRUE) %>% 
+  select(-trecho) # retira a coluna trecho
+
 # Salva todo o data frame: 
-write_rds(all_data, "clean_data.rds")
-  
+#write_rds(all_data, "clean_data.rds")
+write_rds(all_data, "clean_interpol_data.rds")
