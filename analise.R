@@ -68,6 +68,7 @@ ajuste %<>% prune(cp)
 # É possível verificar que uma arvore só com oxy_m1 não é possível ver nada =)
 # no ajuste o modelo escolhe somente a raiz (chutar acerto ou erro ao invés de usar a oxy)
 
+
 ###########
 # Arvores #
 ###########
@@ -95,18 +96,20 @@ data_roc_mean_rpart <- tibble("espec" = roc@x.values[[1]],
                               "method"   = "RPART")
 data_roc_mean %<>% rbind(data_roc_mean_rpart)
 
+
 ######################
 # Floresta aleatoria #
 ######################
+
 formula = quiz_grade~. 
 
 # Classificação usa fatores, regressão usa números reais, por isso
 # colocar em fator:
 ajuste = data_summary_cols %>%
-  mutate(quiz_grade = as.factor(quiz_grade)) %>% 
+  mutate(quiz_grade = as.numeric(quiz_grade)) %>% 
   randomForest(formula, .)
 
-roc <- prediction(ajuste$votes[,2], data_summary_cols$quiz_grade)
+roc <- prediction(ajuste$predicted, data_summary_cols$quiz_grade)
 performance(roc, measure = "auc")
 roc <- performance(roc, measure = "tpr", x.measure = "fpr")
 data_roc_mean_rf <- tibble("espec" = roc@x.values[[1]],
@@ -114,8 +117,46 @@ data_roc_mean_rf <- tibble("espec" = roc@x.values[[1]],
                            "method"   = "RF")
 data_roc_mean %<>% rbind(data_roc_mean_rf)
 
-#Regressao Logistica
+
+######################
+# Regressao Logistica #
+######################
+
 XX = model.matrix(quiz_grade~., data_summary_cols)
+YY = data_summary_cols %>% ungroup() %>% select(quiz_grade) %>% as.matrix()
+
+aux <- cv.glmnet(XX, YY, family = "binomial",
+                 keep = TRUE, nfolds=nrow(XX))
+i <- which(aux$lambda == aux$lambda.min)
+coefficients(aux, s = aux$lambda.min)
+
+# Entender quais subjects o modelo erra mais
+#erros = abs(aux$fit.preval[,i] - data_summary_cols$quiz_grade)
+#dim(erros) = c(10, 16)
+#colMeans(erros)
+
+roc <- prediction(aux$fit.preval[,i], data_summary_cols$quiz_grade)
+performance(roc, measure = "auc")
+roc <- performance(roc, measure = "tpr", x.measure = "fpr")
+data_roc_mean_glm <- tibble("espec" = roc@x.values[[1]],
+                            "sens" = roc@y.values[[1]],
+                            "method"   = "GLMNET")
+data_roc_mean %<>% rbind(data_roc_mean_glm)
+
+
+######################
+# PCA + Regressão    #
+######################
+
+# Não deu certo. Ele joga todo mundo fora =(
+ajuste_pca = data_summary_cols %>% 
+  select(-patient, -video, -quiz_grade) %>%
+  as.matrix() %>% 
+  prcomp(center = FALSE)
+
+XX = data_summary_cols %>% 
+  model.matrix(quiz_grade~patient+video, .) %>% 
+  cbind(ajuste_pca$x)
 YY = data_summary_cols %>% ungroup() %>% select(quiz_grade) %>% as.matrix()
 
 aux <- cv.glmnet(XX, YY, family = "binomial",
@@ -128,8 +169,13 @@ performance(roc, measure = "auc")
 roc <- performance(roc, measure = "tpr", x.measure = "fpr")
 data_roc_mean_glm <- tibble("espec" = roc@x.values[[1]],
                             "sens" = roc@y.values[[1]],
-                            "method"   = "GLMNET")
+                            "method"   = "PCA-GLMNET")
 data_roc_mean %<>% rbind(data_roc_mean_glm)
+
+
+##########################
+# Curvas ROC dos modelos #
+##########################
 
 gmean <- data_roc_mean %>%
   ggplot()+
