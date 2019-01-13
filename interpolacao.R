@@ -7,11 +7,12 @@ interpolate_signal = function(signal, these_bad_channels)
     if(length(neighbors > 1))
     {
       signal[,channel] = rowMeans(as.matrix(signal[,neighbors]), na.rm = TRUE)
+      print(paste("canal", channel, ": interpolados"))
     }
     else
     {
       signal[,channel] = rowMeans(signal, na.rm = TRUE)
-      print("2")
+      print(paste("canal", channel, ": sem vizinhos válidos"))
     }
   }
   signal
@@ -22,7 +23,7 @@ interpol = read.csv("interpol.csv")[, -1]
 num_patients = length(list.files("./Oxy/"))
 patients = 1:num_patients
 for(patient in patients) {
-  print(patient)
+  print(paste("ID: ", patient))
   these_bad_channels = which(!good_channels[patient,])
   
   oxy_path = paste("./Oxy/", patient, ".txt", sep = "")

@@ -4,15 +4,20 @@ library(stats)
 library(tidyverse)
 library(magrittr)
 library(randomForest)
+library(rpart)
+library(rpart.plot)
 
 ###############################
 # Pre-processamento dos dados #
 ###############################
 
+
 #all_data = read_rds("clean_data.rds")
 all_data = read_rds("clean_interpol_data.rds")
 
 data_summary = all_data %>%
+  # Retirar ids: 4, 9, 13 e 14 
+  filter(!(patient %in% c(4, 9, 13, 14))) %>%
   filter(!is.na(oxy) & !is.na(deoxy)) %>%
   group_by(patient, video, channel) %>%
   summarise(oxy_m = mean(oxy, na.rm = TRUE),
@@ -42,7 +47,21 @@ for(ii in unique(data_summary$channel))
 
 # write_rds(data_summary_cols, "data_summary_cols.rds")
 
-data_summary_cols = read_rds("data_summary_cols.rds")
+data_summary_cols = read_rds("data_summary_cols.rds") 
+
+colnames(data_summary_cols)
+
+##############################
+# Teste t                    #
+##############################
+
+teste = 
+data_summary  %>% 
+  filter(video == 2, channel == 1)
+    
+
+
+
 
 
 ##############################
@@ -156,7 +175,7 @@ ajuste_pca = data_summary_cols %>%
 
 XX = data_summary_cols %>% 
   model.matrix(quiz_grade~patient+video, .) %>% 
-  cbind(ajuste_pca$x)
+  cbind(ajuste_pca$x[,1:3])
 YY = data_summary_cols %>% ungroup() %>% select(quiz_grade) %>% as.matrix()
 
 aux <- cv.glmnet(XX, YY, family = "binomial",
@@ -186,3 +205,4 @@ gmean <- data_roc_mean %>%
   geom_abline(size = 1.2)
 ggsave("./figuras/ROC_medias.pdf", plot = gmean)
 gmean
+
