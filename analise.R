@@ -16,8 +16,9 @@ library(rpart.plot)
 all_data = read_rds("clean_interpol_data.rds")
 
 data_summary = all_data %>%
-  # Retirar ids: 4, 9, 13 e 14 
-  filter(!(patient %in% c(4, 9, 13, 14))) %>%
+  # Retirar ids: 4, 9, 13 e 14. Pior mesmo era o 14
+  # filter(!(patient %in% c(4, 9, 13, 14))) %>%
+  filter(!(patient %in% c(14))) %>%
   filter(!is.na(oxy) & !is.na(deoxy)) %>%
   group_by(patient, video, channel) %>%
   summarise(oxy_m = mean(oxy, na.rm = TRUE),
@@ -52,15 +53,12 @@ data_summary_cols = read_rds("data_summary_cols.rds")
 colnames(data_summary_cols)
 
 ##############################
-# Teste t                    #
+# ANOVA                      #
 ##############################
 
-teste = 
-data_summary  %>% 
-  filter(video == 2, channel == 1)
-    
-
-
+summary(lm(oxy_m ~ quiz_grade + patient + channel, data = data_summary))
+summary(lm(deoxy_m ~ quiz_grade + patient + channel, data = data_summary))
+# montar mapa por canal pra ver onde o p-valor dá menor que 0.05/20
 
 
 
@@ -86,7 +84,6 @@ ajuste %<>% prune(cp)
   
 # É possível verificar que uma arvore só com oxy_m1 não é possível ver nada =)
 # no ajuste o modelo escolhe somente a raiz (chutar acerto ou erro ao invés de usar a oxy)
-
 
 ###########
 # Arvores #
@@ -141,11 +138,21 @@ data_roc_mean %<>% rbind(data_roc_mean_rf)
 # Regressao Logistica #
 ######################
 
-XX = model.matrix(quiz_grade~., data_summary_cols)
+data_summary_cols %<>% arrange(patient)
+
+# pega o fold para cada patient:
+foldid_p = 1 + ((order(data_summary_cols$patient) - 1) %/% 10)
+nfolds_p = max(foldid_p)
+
+colnames(data_summary_cols)
+fm = quiz_grade~.
+XX= data_summary_cols %>% select(-oxy_m_3) %>% model.matrix(fm, .)
+
 YY = data_summary_cols %>% ungroup() %>% select(quiz_grade) %>% as.matrix()
 
 aux <- cv.glmnet(XX, YY, family = "binomial",
-                 keep = TRUE, nfolds=nrow(XX))
+                 keep = TRUE, nfolds = nfolds_p,
+                 foldid = foldid_p)
 i <- which(aux$lambda == aux$lambda.min)
 coefficients(aux, s = aux$lambda.min)
 
@@ -168,28 +175,28 @@ data_roc_mean %<>% rbind(data_roc_mean_glm)
 ######################
 
 # Não deu certo. Ele joga todo mundo fora =(
-ajuste_pca = data_summary_cols %>% 
-  select(-patient, -video, -quiz_grade) %>%
-  as.matrix() %>% 
-  prcomp(center = FALSE)
-
-XX = data_summary_cols %>% 
-  model.matrix(quiz_grade~patient+video, .) %>% 
-  cbind(ajuste_pca$x[,1:3])
-YY = data_summary_cols %>% ungroup() %>% select(quiz_grade) %>% as.matrix()
-
-aux <- cv.glmnet(XX, YY, family = "binomial",
-                 keep = TRUE, nfolds=nrow(XX))
-i <- which(aux$lambda == aux$lambda.min)
-coefficients(aux, s = aux$lambda.min)
-
-roc <- prediction(aux$fit.preval[,i], data_summary_cols$quiz_grade)
-performance(roc, measure = "auc")
-roc <- performance(roc, measure = "tpr", x.measure = "fpr")
-data_roc_mean_glm <- tibble("espec" = roc@x.values[[1]],
-                            "sens" = roc@y.values[[1]],
-                            "method"   = "PCA-GLMNET")
-data_roc_mean %<>% rbind(data_roc_mean_glm)
+# ajuste_pca = data_summary_cols %>% 
+#   select(-patient, -video, -quiz_grade) %>%
+#   as.matrix() %>% 
+#   prcomp(center = FALSE)
+# 
+# XX = data_summary_cols %>% 
+#   model.matrix(quiz_grade~patient+video, .) %>% 
+#   cbind(ajuste_pca$x[,1:3])
+# YY = data_summary_cols %>% ungroup() %>% select(quiz_grade) %>% as.matrix()
+# 
+# aux <- cv.glmnet(XX, YY, family = "binomial",
+#                  keep = TRUE, nfolds=nrow(XX))
+# i <- which(aux$lambda == aux$lambda.min)
+# coefficients(aux, s = aux$lambda.min)
+# 
+# roc <- prediction(aux$fit.preval[,i], data_summary_cols$quiz_grade)
+# performance(roc, measure = "auc")
+# roc <- performance(roc, measure = "tpr", x.measure = "fpr")
+# data_roc_mean_glm <- tibble("espec" = roc@x.values[[1]],
+#                             "sens" = roc@y.values[[1]],
+#                             "method"   = "PCA-GLMNET")
+# data_roc_mean %<>% rbind(data_roc_mean_glm)
 
 
 ##########################
@@ -205,4 +212,163 @@ gmean <- data_roc_mean %>%
   geom_abline(size = 1.2)
 ggsave("./figuras/ROC_medias.pdf", plot = gmean)
 gmean
+
+
+
+#############################
+# Teste Permutação - GLMNET #
+#############################
+
+# rodar umas mil vezes essa ROC dos dados permutados.
+# ver qual proporção deu maior ou igual a ROC da original.
+# pego o p-valor dessa distribuição
+
+# inicialização do arquivo
+# permutacoes = NULL
+# write_rds(permutacoes, "permutacoes_auc.rds")
+
+for(n in 1:1000){
+  
+  data_permutado = data_summary_cols
+  data_permutado$quiz_grade = sample(data_permutado$quiz_grade)
+  
+  XX = model.matrix(quiz_grade~., data_permutado)
+  YY = data_permutado %>% ungroup() %>% select(quiz_grade) %>% as.matrix()
+  
+  aux <- cv.glmnet(XX, YY, family = "binomial",
+                   keep = TRUE, nfolds = nfolds_p,
+                   foldid = foldid_p)
+  i <- which(aux$lambda == aux$lambda.min)
+  coefficients(aux, s = aux$lambda.min)
+  
+  # Entender quais subjects o modelo erra mais
+  #erros = abs(aux$fit.preval[,i] - data_permutado$quiz_grade)
+  #dim(erros) = c(10, 16)
+  #colMeans(erros)
+  
+  roc <- prediction(aux$fit.preval[,i], data_permutado$quiz_grade)
+  permutacoes = read_rds("permutacoes_auc.rds")
+  permutacoes = c(permutacoes, 
+                  performance(roc, measure = "auc")@y.values[[1]])
+  print(n, performance(roc, measure = "auc")@y.values[[1]])
+  write_rds(permutacoes, "permutacoes_auc.rds")
+}
+
+# write_rds(permutacoes_2, "permutacoes_auc.rds")
+verificacao = read_rds("permutacoes_auc.rds")
+maior = verificacao
+maior[which(verificacao >= 0.695613)]
+length(verificacao)
+
+# Pegar os principais canais e montar o mapa dos principais.
+
+
+
+
+#############################
+# Teste Permutação - RPART #
+#############################
+
+# write_rds(NULL, "permutacoes_auc_rpart.rds")
+
+
+ for(n in 1:1000){
+  data_permutado_rpart = data_summary_cols
+  data_permutado_rpart$quiz_grade = sample(data_permutado_rpart$quiz_grade)
+  
+  ## Arvore com todo mundo
+  # Ajuste da arvore. Acertos em função de oxy_m_1: 
+  formula = quiz_grade~.
+  ajuste_todos = data_permutado_rpart %>% 
+    select(-patient, -video) %>% 
+    rpart(formula, .)
+  
+  # Identificando o nível da árvore com melhor erro de validação cruzada:
+  melhor_nivel = which.min(ajuste_todos$cptable[,"xerror"])
+  
+  # Identifica cp associado ao melhor nivel:
+  cp = ajuste_todos$cptable[melhor_nivel, "CP"]
+  
+  ajuste_todos %<>% prune(cp) 
+  roc <- prediction(predict(ajuste_todos),
+                    data_permutado_rpart$quiz_grade)
+  performance(roc, measure = "auc")
+  performance(roc, measure = "auc")@y.values[[1]]
+
+  #write_rds(permutacoes_rpart, "permutacoes_auc_rpart.rds")
+  
+  permutacoes_rpart = read_rds("permutacoes_auc_rpart.rds")
+  permutacoes_rpart = c(permutacoes_rpart, 
+                  performance(roc, measure = "auc")@y.values[[1]])
+  print(n, performance(roc, measure = "auc")@y.values[[1]])
+  write_rds(permutacoes_rpart, "permutacoes_auc_rpart.rds")
+  
+  
+  roc <- performance(roc, measure = "tpr", x.measure = "fpr")
+  data_roc_mean_rpart <- tibble("espec" = roc@x.values[[1]],
+                                "sens" = roc@y.values[[1]],
+                                "method"   = "RPART")
+  data_roc_mean %<>% rbind(data_roc_mean_rpart)
+ 
+}  
+  
+verificacao = read_rds("permutacoes_auc_rpart.rds")
+maior = verificacao
+maior[which(verificacao >= 0.50)]
+length(maior[which(verificacao >= 0.5)])
+length(verificacao)
+p_value = length(maior[which(verificacao >= 0.5)]) / length(verificacao)
+
+
+# write_rds(permutacoes_rf, "permutacoes_auc_rf.rds")
+
+
+####################################
+# Teste Permutação - Random Forest #
+####################################
+
+# write_rds(NULL, "permutacoes_auc_rf.rds")
+for(n in 1:1000){
+  
+  data_permutado_rf = data_summary_cols
+  data_permutado_rf$quiz_grade = sample(data_permutado_rf$quiz_grade)
+  
+
+formula = quiz_grade~. 
+
+# Classificação usa fatores, regressão usa números reais, por isso
+# colocar em fator:
+ajuste = data_permutado_rf %>%
+  mutate(quiz_grade = as.numeric(quiz_grade)) %>% 
+  randomForest(formula, .)
+
+roc <- prediction(ajuste$predicted, data_permutado_rf$quiz_grade)
+performance(roc, measure = "auc")
+
+performance(roc, measure = "auc")@y.values[[1]]
+
+permutacoes_rf = read_rds("permutacoes_auc_rf.rds")
+
+permutacoes_rf = c(permutacoes_rf, 
+                   performance(roc, measure = "auc")@y.values[[1]])
+print(n, performance(roc, measure = "auc")@y.values[[1]])
+write_rds(permutacoes_rf, "permutacoes_auc_rf.rds")
+
+
+roc <- performance(roc, measure = "tpr", x.measure = "fpr")
+data_roc_mean_rf <- tibble("espec" = roc@x.values[[1]],
+                           "sens" = roc@y.values[[1]],
+                           "method"   = "RF")
+data_roc_mean %<>% rbind(data_roc_mean_rf)
+}
+
+
+verificacao = read_rds("permutacoes_auc_rf.rds")
+maior = verificacao
+maior[which(verificacao >= 0.6819411)]
+length(maior[which(verificacao >= 0.6819411)])
+length(verificacao)
+p_value = length(maior[which(verificacao >= 0.6819411)]) / length(verificacao)
+p_value
+
 
