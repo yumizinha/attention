@@ -7,7 +7,6 @@ library(randomForest)
 library(rpart)
 library(rpart.plot)
 library(plotly)
-library(e1071)
 
 ###############################
 # Pre-processamento dos dados #
@@ -18,7 +17,7 @@ library(e1071)
 all_data = read_rds("clean_interpol_data.rds")
 
 data_summary = all_data %>%
-  # Retirar ids: se der 4, 9, 13. Pior mesmo era o 14
+  # Retirar ids: 4, 9, 13 e 14. Pior mesmo era o 14
   # filter(!(patient %in% c(4, 9, 13, 14))) %>%
   filter(!(patient %in% c(14))) %>%
   filter(!is.na(oxy) & !is.na(deoxy)) %>%
@@ -83,7 +82,7 @@ melhor_nivel = which.min(ajuste$cptable[,"xerror"])
 # Identifica cp associado ao melhor nivel:
 cp = ajuste$cptable[melhor_nivel, "CP"]
 ajuste %<>% prune(cp)
-  
+
 # É possível verificar que uma arvore só com oxy_m1 não é possível ver nada =)
 # no ajuste o modelo escolhe somente a raiz (chutar acerto ou erro ao invés de usar a oxy)
 
@@ -119,39 +118,22 @@ data_roc_mean %<>% rbind(data_roc_mean_rpart)
 # Floresta aleatoria #
 ######################
 
-formula = quiz_grade~.
+formula = quiz_grade~. 
 
 # Classificação usa fatores, regressão usa números reais, por isso
 # colocar em fator:
+ajuste = data_summary_cols %>%
+  select(-video) %>% 
+  mutate(quiz_grade = as.numeric(quiz_grade)) %>% 
+  randomForest(formula, .)
 
-result = NULL
-patients = unique(data_summary_cols$patient)
-for(patient_i in patients){
-  data_summary_cols_cv = data_summary_cols %>% 
-    filter(patient != patient_i)
-  ajuste = data_summary_cols_cv %>%
-    mutate(quiz_grade = as.numeric(quiz_grade)) %>% 
-    randomForest(formula, .)
-  data_summary_cols_test = data_summary_cols %>% 
-    filter(patient == patient_i)
-  result = c(result,
-             predict(ajuste, data_summary_cols_test))
-}
-
-roc <- prediction(result, data_summary_cols$quiz_grade)
+roc <- prediction(ajuste$predicted, data_summary_cols$quiz_grade)
 performance(roc, measure = "auc")
 roc <- performance(roc, measure = "tpr", x.measure = "fpr")
 data_roc_mean_rf <- tibble("espec" = roc@x.values[[1]],
                            "sens" = roc@y.values[[1]],
                            "method"   = "RF")
 data_roc_mean %<>% rbind(data_roc_mean_rf)
-
-# Entender quais subjects o modelo erra mais
-erros = abs(ajuste$predicted - data_summary_cols$quiz_grade)
-dim(erros) = c(10, 18)
-colMeans(erros) # erros preditos dos pacientes: piores sao 4, 9 e 15
-rowMeans(erros) # questoes que o modelo é pior: 2, 3, 7 e 8
-
 
 # Analisando os canais da saida de RF
 imp = importance(ajuste)[,1]
@@ -160,116 +142,44 @@ p  <- plot_ly(
   x = names(imp), y = imp,
   type = "bar",
   name = "RF"
-  )
+)
 p
 
 ######################
 # Regressao Logistica #
 ######################
+
 data_summary_cols %<>% arrange(patient)
+
+# pega o fold para cada patient:
+foldid_p = 1 + ((order(data_summary_cols$patient) - 1) %/% 10)
+nfolds_p = max(foldid_p)
+
+colnames(data_summary_cols)
 fm = quiz_grade~.
+XX= data_summary_cols %>% select(-video) %>% model.matrix(fm, .)
 
-result = NULL
-patients = unique(data_summary_cols$patient)
-for(patient_i in patients){
+YY = data_summary_cols %>% ungroup() %>% select(quiz_grade) %>% as.matrix()
 
-  data_summary_cols_cv = data_summary_cols %>%
-    filter(patient != patient_i)
-  # pega o fold para cada patient:
-  foldid_p = 1 + ((order(data_summary_cols_cv$patient) - 1) %/% 10)
-  nfolds_p = max(foldid_p)
-  
-  XX = data_summary_cols_cv %>% 
-    model.matrix(fm, .)
-  
-  YY = data_summary_cols_cv %>% 
-    ungroup() %>% 
-    select(quiz_grade) %>% 
-    as.matrix()
-  
-  aux <- cv.glmnet(XX, YY, family = "binomial",
-                   keep = TRUE, nfolds = nfolds_p,
-                   foldid = foldid_p)
-  # i <- which(aux$lambda == aux$lambda.min)
-  
-  data_summary_cols_test = data_summary_cols %>%
-    filter(patient == patient_i)
-  
-  XX = data_summary_cols_test %>% 
-    model.matrix(fm, .)
-  
-  YY = data_summary_cols_test %>% 
-    ungroup() %>% 
-    select(quiz_grade) %>% 
-    as.matrix()
-  
-  result = c(result, predict(aux, XX, type = "response"))
-  }
-
-# gambi mágica pro plot funcionar
-# exibição do gráfico dos resultados de AUC 
-# e valores de λ mínimo (para AUC mínimo)
-# e 1se (para AUC menor um desvio padrão do mínimo)
-#graphics.off()
-#par("mar")
-#par(mar=c(1,1,1,1))
-
-#plot(aux, xlab="Mean-squared error", ylab="log labda")
-#mycoefs <- coef(aux)@Dimnames[[1]][-1]
-#cbind(1:length(mycoefs), mycoefs)
-
-# op <- par(mfrow=c(1, 2))
-# plot(aux$glmnet.fit, xvar="norm", label=TRUE, 
-#      xlab="L1 norm", ylab="Coefficients")
-# plot(aux$glmnet.fit, xvar="lambda", label=TRUE,
-#      xlab="log lambda", ylab="Coefficients")
-# par(op)
-# 
-# aux$lambda.min
-# aux$lambda.1se
+aux <- cv.glmnet(XX, YY, family = "binomial",
+                 keep = TRUE, nfolds = nfolds_p,
+                 foldid = foldid_p)
+i <- which(aux$lambda == aux$lambda.min)
+coefficients(aux, s = aux$lambda.min)
 
 # Entender quais subjects o modelo erra mais
-# erros = abs(aux$fit.preval[,i] - data_summary_cols$quiz_grade)
-# dim(erros) = c(10, 18)
-# colMeans(erros) # erros preditos dos pacientes: piores sao 4, 9 e 13
-# rowMeans(erros) # questoes que o modelo é pior: 2, 3, 7, 8
+#erros = abs(aux$fit.preval[,i] - data_summary_cols$quiz_grade)
+#dim(erros) = c(10, 16)
+#colMeans(erros)
 
-roc <- prediction(result, data_summary_cols$quiz_grade)
-performance(roc, measure = "acc")
+roc <- prediction(aux$fit.preval[,i], data_summary_cols$quiz_grade)
+performance(roc, measure = "auc")
 roc <- performance(roc, measure = "tpr", x.measure = "fpr")
 data_roc_mean_glm <- tibble("espec" = roc@x.values[[1]],
                             "sens" = roc@y.values[[1]],
                             "method"   = "GLMNET")
 data_roc_mean %<>% rbind(data_roc_mean_glm)
 
-
-######################
-# PCA + Regressão    #
-######################
-
-# Não deu certo. Ele joga todo mundo fora =(
- ajuste_pca = data_summary_cols %>% 
-   select(-patient, -video, -quiz_grade) %>%
-   as.matrix() %>% 
-   prcomp(center = FALSE)
-# 
- XX = data_summary_cols %>% 
-   model.matrix(quiz_grade~patient+video, .) %>% 
-   cbind(ajuste_pca$x[,1:5])
- YY = data_summary_cols %>% ungroup() %>% select(quiz_grade) %>% as.matrix()
- 
- aux <- cv.glmnet(XX, YY, family = "binomial",
-                  keep = TRUE, nfolds=nrow(XX))
- i <- which(aux$lambda == aux$lambda.min)
- coefficients(aux, s = aux$lambda.min)
- 
- roc <- prediction(aux$fit.preval[,i], data_summary_cols$quiz_grade)
- performance(roc, measure = "auc")
- roc <- performance(roc, measure = "tpr", x.measure = "fpr")
- data_roc_mean_glm <- tibble("espec" = roc@x.values[[1]],
-                             "sens" = roc@y.values[[1]],
-                             "method"   = "PCA-GLMNET")
- data_roc_mean %<>% rbind(data_roc_mean_glm)
 
 
 ##########################
@@ -330,7 +240,7 @@ for(n in 1:1000){
 # write_rds(permutacoes_2, "permutacoes_auc.rds")
 verificacao = read_rds("permutacoes_auc.rds")
 maior = verificacao
-maior[which(verificacao >= 0.6948618)]
+maior[which(verificacao >= 0.695613)]
 length(verificacao)
 
 # Pegar os principais canais e montar o mapa dos principais.
@@ -345,7 +255,7 @@ length(verificacao)
 # write_rds(NULL, "permutacoes_auc_rpart.rds")
 
 
- for(n in 1:1000){
+for(n in 1:1000){
   data_permutado_rpart = data_summary_cols
   data_permutado_rpart$quiz_grade = sample(data_permutado_rpart$quiz_grade)
   
@@ -367,12 +277,12 @@ length(verificacao)
                     data_permutado_rpart$quiz_grade)
   performance(roc, measure = "auc")
   performance(roc, measure = "auc")@y.values[[1]]
-
+  
   #write_rds(permutacoes_rpart, "permutacoes_auc_rpart.rds")
   
   permutacoes_rpart = read_rds("permutacoes_auc_rpart.rds")
   permutacoes_rpart = c(permutacoes_rpart, 
-                  performance(roc, measure = "auc")@y.values[[1]])
+                        performance(roc, measure = "auc")@y.values[[1]])
   print(n, performance(roc, measure = "auc")@y.values[[1]])
   write_rds(permutacoes_rpart, "permutacoes_auc_rpart.rds")
   
@@ -382,9 +292,9 @@ length(verificacao)
                                 "sens" = roc@y.values[[1]],
                                 "method"   = "RPART")
   data_roc_mean %<>% rbind(data_roc_mean_rpart)
- 
-}  
   
+}  
+
 verificacao = read_rds("permutacoes_auc_rpart.rds")
 maior = verificacao
 maior[which(verificacao >= 0.50)]
@@ -406,33 +316,33 @@ for(n in 1:1000){
   data_permutado_rf = data_summary_cols
   data_permutado_rf$quiz_grade = sample(data_permutado_rf$quiz_grade)
   
-
-formula = quiz_grade~. 
-
-# Classificação usa fatores, regressão usa números reais, por isso
-# colocar em fator:
-ajuste = data_permutado_rf %>%
-  mutate(quiz_grade = as.numeric(quiz_grade)) %>% 
-  randomForest(formula, .)
-
-roc <- prediction(ajuste$predicted, data_permutado_rf$quiz_grade)
-performance(roc, measure = "auc")
-
-performance(roc, measure = "auc")@y.values[[1]]
-
-permutacoes_rf = read_rds("permutacoes_auc_rf.rds")
-
-permutacoes_rf = c(permutacoes_rf, 
-                   performance(roc, measure = "auc")@y.values[[1]])
-print(n, performance(roc, measure = "auc")@y.values[[1]])
-write_rds(permutacoes_rf, "permutacoes_auc_rf.rds")
-
-
-roc <- performance(roc, measure = "tpr", x.measure = "fpr")
-data_roc_mean_rf <- tibble("espec" = roc@x.values[[1]],
-                           "sens" = roc@y.values[[1]],
-                           "method"   = "RF")
-data_roc_mean %<>% rbind(data_roc_mean_rf)
+  
+  formula = quiz_grade~. 
+  
+  # Classificação usa fatores, regressão usa números reais, por isso
+  # colocar em fator:
+  ajuste = data_permutado_rf %>%
+    mutate(quiz_grade = as.numeric(quiz_grade)) %>% 
+    randomForest(formula, .)
+  
+  roc <- prediction(ajuste$predicted, data_permutado_rf$quiz_grade)
+  performance(roc, measure = "auc")
+  
+  performance(roc, measure = "auc")@y.values[[1]]
+  
+  permutacoes_rf = read_rds("permutacoes_auc_rf.rds")
+  
+  permutacoes_rf = c(permutacoes_rf, 
+                     performance(roc, measure = "auc")@y.values[[1]])
+  print(n, performance(roc, measure = "auc")@y.values[[1]])
+  write_rds(permutacoes_rf, "permutacoes_auc_rf.rds")
+  
+  
+  roc <- performance(roc, measure = "tpr", x.measure = "fpr")
+  data_roc_mean_rf <- tibble("espec" = roc@x.values[[1]],
+                             "sens" = roc@y.values[[1]],
+                             "method"   = "RF")
+  data_roc_mean %<>% rbind(data_roc_mean_rf)
 }
 
 
@@ -445,20 +355,8 @@ p_value = length(maior[which(verificacao >= 0.6819411)]) / length(verificacao)
 p_value
 
 
-######################
-# SVM                #
-######################
+# PARA DOCUMENTAÇÃO DA DISSERTAÇÃO
+# Interpretação da hemodinâmica varia conforme cada vídeo: 
+# retirada do video interfere na regressão e na RF
+# informação de oxy e deoxy melhora o modelo
 
-data_summary_cols %<>% arrange(patient)
-
-colnames(data_summary_cols)
-fm = quiz_grade~.
-XX= data_summary_cols %>% model.matrix(fm, .)
-YY = data_summary_cols %>% ungroup() %>% select(quiz_grade) %>% as.matrix()
-
-# Criando modelo SVM a partir do conjunto de dados iris
-ajuste = XX
-  aux <- svm(quiz_grade~., data = XX)
-
-# Resumo do modelo
-summary(aux)

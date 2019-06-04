@@ -15,9 +15,10 @@ library(rpart.plot)
 #all_data = read_rds("clean_data.rds")
 all_data = read_rds("clean_interpol_data.rds")
 
+
 data_summary = all_data %>%
-  # Retirar ids: 4, 9, 13 e 14. Pior mesmo era o 14
-  filter(!(patient %in% c(14, 19))) %>%
+  # Retirar ids: 14
+  filter(!(patient %in% c(14,19))) %>%
   filter(!is.na(oxy) & !is.na(deoxy)) %>%
   group_by(patient, video, channel) %>%
   summarise(oxy_m = mean(oxy, na.rm = TRUE),
@@ -45,8 +46,8 @@ for(ii in unique(data_summary$channel))
                                    by = c("patient", "video")) 
 }
 
-write_rds(data_summary_cols, "data_summary_cols_teste19.rds")
-data_summary_cols = read_rds("data_summary_cols_teste19.rds") 
+write_rds(data_summary_cols, "data_summary_cols_test19.rds")
+data_summary_cols = read_rds("data_summary_cols_test19.rds") 
 
 colnames(data_summary_cols)
 
@@ -62,7 +63,7 @@ nfolds_p = max(foldid_p)
 
 colnames(data_summary_cols)
 fm = quiz_grade~.
-XX= data_summary_cols %>% select(-oxy_m_3) %>% model.matrix(fm, .)
+XX= data_summary_cols %>% model.matrix(fm, .)
 
 YY = data_summary_cols %>% ungroup() %>% select(quiz_grade) %>% as.matrix()
 
@@ -72,10 +73,6 @@ aux <- cv.glmnet(XX, YY, family = "binomial",
 i <- which(aux$lambda == aux$lambda.min)
 coefficients(aux, s = aux$lambda.min)
 
-# Entender quais subjects o modelo erra mais
-#erros = abs(aux$fit.preval[,i] - data_summary_cols$quiz_grade)
-#dim(erros) = c(10, 16)
-#colMeans(erros)
 
 roc <- prediction(aux$fit.preval[,i], data_summary_cols$quiz_grade)
 performance(roc, measure = "auc")
