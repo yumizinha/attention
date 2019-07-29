@@ -8,6 +8,7 @@ library(rpart)
 library(rpart.plot)
 library(plotly)
 library(e1071)
+library(caret)
 
 ###############################
 # Pre-processamento dos dados #
@@ -17,13 +18,27 @@ library(e1071)
 #all_data = read_rds("clean_data.rds")
 all_data = read_rds("clean_interpol_data.rds")
 
+
+# Tirar a média do sinal para eliminação de baseline dos sujeitos
+all_data %<>% 
+  group_by(patient, channel) %>%
+  summarise(oxy_m = mean(oxy, na.rm = TRUE),
+            deoxy_m = mean(deoxy, na.rm = TRUE)
+  ) %>% 
+  ungroup() %>% 
+  inner_join(all_data, ., by = c("patient", "channel")) %>% 
+  mutate(oxy = oxy - oxy_m, 
+         deoxy = deoxy - deoxy_m)
+
+
+# Dados extraídos da série temporal
 data_summary = all_data %>%
   # Retirar ids: se der 4, 9, 13. Pior mesmo era o 14
-  # filter(!(patient %in% c(4, 9, 13, 14))) %>%
   filter(!(patient %in% c(14))) %>%
   filter(!is.na(oxy) & !is.na(deoxy)) %>%
   group_by(patient, video, channel) %>%
-  summarise(oxy_m = mean(oxy, na.rm = TRUE),
+  summarise(
+            #oxy_m = mean(oxy, na.rm = TRUE),
             deoxy_m = mean(deoxy, na.rm = TRUE),
             quiz_grade = mean(quiz_grade)
   ) %>% 
@@ -40,28 +55,37 @@ for(ii in unique(data_summary$channel))
 {
   new_data = data_summary %>% 
     filter(channel == ii) %>% 
-    select(patient, video, oxy_m, deoxy_m)
-  colnames(new_data)[3:4] = paste(colnames(new_data)[3:4],
+    select(patient, 
+           video, 
+           #oxy_m,
+           deoxy_m
+    )
+  # [3:4] para oxy + deoxy, [3:3] pra uma só
+  colnames(new_data)[3:3] = paste(colnames(new_data)[3:3],
                                   ii, 
                                   sep = "_")
   data_summary_cols %<>% left_join(new_data,
                                    by = c("patient", "video")) 
 }
 
-# write_rds(data_summary_cols, "data_summary_cols.rds")
+#write_rds(data_summary_cols, "data_summary_cols.rds")
 
 data_summary_cols = read_rds("data_summary_cols.rds") 
 
 colnames(data_summary_cols)
 
+
 ##############################
 # ANOVA                      #
 ##############################
 
-summary(lm(oxy_m ~ quiz_grade + patient + channel, data = data_summary))
-summary(lm(deoxy_m ~ quiz_grade + patient + channel, data = data_summary))
-# montar mapa por canal pra ver onde o p-valor dá menor que 0.05/20
+# Delineamento do quanto a oxy/deoxy é explicada 
+# pelos acertos e erros. Testando se Oxy e deoxy 
+# de quem acerta é diferente de quem erra
 
+# montar mapa por canal pra ver onde o p-valor dá menor que 0.05/20
+summary(lm(oxy_m_18 ~ quiz_grade + patient, data = data_summary_cols))
+summary(lm(deoxy_m_18 ~ quiz_grade + patient, data = data_summary_cols))
 
 
 ##############################
@@ -69,23 +93,6 @@ summary(lm(deoxy_m ~ quiz_grade + patient + channel, data = data_summary))
 ##############################
 data_roc_mean = tibble()
 
-
-###########
-# Exemplo - Implementando Arvore simples
-#########
-
-# Ajuste da arvore. Acertos em função de oxy_m_1: 
-ajuste = rpart(quiz_grade ~ oxy_m_1, data_summary_cols)
-
-# Identificando o nível da árvore com melhor erro de validação cruzada:
-melhor_nivel = which.min(ajuste$cptable[,"xerror"])
-
-# Identifica cp associado ao melhor nivel:
-cp = ajuste$cptable[melhor_nivel, "CP"]
-ajuste %<>% prune(cp)
-  
-# É possível verificar que uma arvore só com oxy_m1 não é possível ver nada =)
-# no ajuste o modelo escolhe somente a raiz (chutar acerto ou erro ao invés de usar a oxy)
 
 ###########
 # Arvores #
@@ -123,8 +130,8 @@ formula = quiz_grade~.
 
 # Classificação usa fatores, regressão usa números reais, por isso
 # colocar em fator:
-
 result = NULL
+result_type = NULL
 patients = unique(data_summary_cols$patient)
 for(patient_i in patients){
   data_summary_cols_cv = data_summary_cols %>% 
@@ -136,7 +143,15 @@ for(patient_i in patients){
     filter(patient == patient_i)
   result = c(result,
              predict(ajuste, data_summary_cols_test))
+  result_type = c(result_type,
+                  predict(ajuste, 
+                          data_summary_cols_test,
+                          type = "response"))
 }
+result_class = as.factor(result_type > 0.705)
+reference = as.factor(data_summary_cols$quiz_grade > 0.705)
+
+confusionMatrix(result_class, reference, dnn = c("result", "quiz_grade"))
 
 roc <- prediction(result, data_summary_cols$quiz_grade)
 performance(roc, measure = "auc")
@@ -167,12 +182,13 @@ p
 # Regressao Logistica #
 ######################
 data_summary_cols %<>% arrange(patient)
-fm = quiz_grade~.
+fm = quiz_grade ~. 
 
 result = NULL
+result_type_glmnet = NULL
 patients = unique(data_summary_cols$patient)
 for(patient_i in patients){
-
+  
   data_summary_cols_cv = data_summary_cols %>%
     filter(patient != patient_i)
   # pega o fold para cada patient:
@@ -191,7 +207,7 @@ for(patient_i in patients){
                    keep = TRUE, nfolds = nfolds_p,
                    foldid = foldid_p)
   # i <- which(aux$lambda == aux$lambda.min)
-  
+
   data_summary_cols_test = data_summary_cols %>%
     filter(patient == patient_i)
   
@@ -204,6 +220,11 @@ for(patient_i in patients){
     as.matrix()
   
   result = c(result, predict(aux, XX, type = "response"))
+ # result_type_glmnet = c(result_type_glmnet,
+#                  predict(aux, 
+ #                         data_summary_cols_test,
+  #                        type = "response"))
+  
   }
 
 # gambi mágica pro plot funcionar
@@ -234,8 +255,14 @@ for(patient_i in patients){
 # colMeans(erros) # erros preditos dos pacientes: piores sao 4, 9 e 13
 # rowMeans(erros) # questoes que o modelo é pior: 2, 3, 7, 8
 
+limiar = 0.7225
+result_class = as.factor(result > limiar)
+reference = as.factor(data_summary_cols$quiz_grade > limiar)
+confusionMatrix(result_class, reference, dnn = c("result", "quiz_grade"))
+
+
 roc <- prediction(result, data_summary_cols$quiz_grade)
-performance(roc, measure = "acc")
+performance(roc, measure = "auc")
 roc <- performance(roc, measure = "tpr", x.measure = "fpr")
 data_roc_mean_glm <- tibble("espec" = roc@x.values[[1]],
                             "sens" = roc@y.values[[1]],
@@ -243,33 +270,66 @@ data_roc_mean_glm <- tibble("espec" = roc@x.values[[1]],
 data_roc_mean %<>% rbind(data_roc_mean_glm)
 
 
+
 ######################
 # PCA + Regressão    #
 ######################
 
-# Não deu certo. Ele joga todo mundo fora =(
- ajuste_pca = data_summary_cols %>% 
-   select(-patient, -video, -quiz_grade) %>%
-   as.matrix() %>% 
-   prcomp(center = FALSE)
-# 
- XX = data_summary_cols %>% 
-   model.matrix(quiz_grade~patient+video, .) %>% 
-   cbind(ajuste_pca$x[,1:5])
- YY = data_summary_cols %>% ungroup() %>% select(quiz_grade) %>% as.matrix()
- 
- aux <- cv.glmnet(XX, YY, family = "binomial",
-                  keep = TRUE, nfolds=nrow(XX))
- i <- which(aux$lambda == aux$lambda.min)
- coefficients(aux, s = aux$lambda.min)
- 
- roc <- prediction(aux$fit.preval[,i], data_summary_cols$quiz_grade)
- performance(roc, measure = "auc")
- roc <- performance(roc, measure = "tpr", x.measure = "fpr")
- data_roc_mean_glm <- tibble("espec" = roc@x.values[[1]],
-                             "sens" = roc@y.values[[1]],
-                             "method"   = "PCA-GLMNET")
- data_roc_mean %<>% rbind(data_roc_mean_glm)
+ajuste_pca = data_summary_cols %>% 
+  select(-patient, -video, -quiz_grade) %>%
+  as.matrix() %>% 
+  prcomp(center = FALSE)
+
+d=3
+data_summary_cols_pca = data_summary_cols %>% 
+  select(patient, quiz_grade, video) %>%
+  cbind(ajuste_pca$x[,1:d]) %>% 
+  as_tibble()
+
+result = NULL
+patients = unique(data_summary_cols_pca$patient)
+for(patient_i in patients){
+  
+  data_summary_cols_cv = data_summary_cols_pca %>%
+    filter(patient != patient_i)
+  # pega o fold para cada patient:
+  foldid_p = 1 + ((order(data_summary_cols_cv$patient) - 1) %/% 10)
+  nfolds_p = max(foldid_p)
+  
+  XX = data_summary_cols_cv %>% 
+    model.matrix(fm, .)
+  YY = data_summary_cols_cv %>% 
+    ungroup() %>% 
+    select(quiz_grade) %>% 
+    as.matrix()
+
+  aux <- cv.glmnet(XX, YY, family = "binomial",
+                   keep = TRUE, nfolds = nfolds_p,
+                   foldid = foldid_p)
+  # i <- which(aux$lambda == aux$lambda.min)
+  
+  data_summary_cols_test = data_summary_cols_pca %>%
+    filter(patient == patient_i)
+  
+  XX = data_summary_cols_test %>% 
+    model.matrix(fm, .)
+  
+  YY = data_summary_cols_test %>% 
+    ungroup() %>% 
+    select(quiz_grade) %>% 
+    as.matrix()
+  
+  result = c(result, predict(aux, XX, type = "response"))
+}
+
+
+roc <- prediction(result, data_summary_cols_pca$quiz_grade)
+performance(roc, measure = "auc")
+roc <- performance(roc, measure = "tpr", x.measure = "fpr")
+data_roc_mean_glm <- tibble("espec" = roc@x.values[[1]],
+                            "sens" = roc@y.values[[1]],
+                            "method"   = "PCA-GLMNET")
+data_roc_mean %<>% rbind(data_roc_mean_glm)
 
 
 ##########################
@@ -292,6 +352,8 @@ gmean
 # Teste Permutação - GLMNET #
 #############################
 
+# write_rds(NULL, "permutacoes_auc_glmnet.rds")
+
 # rodar umas mil vezes essa ROC dos dados permutados.
 # ver qual proporção deu maior ou igual a ROC da original.
 # pego o p-valor dessa distribuição
@@ -301,36 +363,92 @@ gmean
 # write_rds(permutacoes, "permutacoes_auc.rds")
 
 for(n in 1:1000){
-  
   data_permutado = data_summary_cols
   data_permutado$quiz_grade = sample(data_permutado$quiz_grade)
   
-  XX = model.matrix(quiz_grade~., data_permutado)
-  YY = data_permutado %>% ungroup() %>% select(quiz_grade) %>% as.matrix()
   
-  aux <- cv.glmnet(XX, YY, family = "binomial",
-                   keep = TRUE, nfolds = nfolds_p,
-                   foldid = foldid_p)
-  i <- which(aux$lambda == aux$lambda.min)
-  coefficients(aux, s = aux$lambda.min)
+  data_permutado %<>% arrange(patient)
+  fm = quiz_grade~.
   
-  # Entender quais subjects o modelo erra mais
-  #erros = abs(aux$fit.preval[,i] - data_permutado$quiz_grade)
-  #dim(erros) = c(10, 16)
-  #colMeans(erros)
+  result = NULL
+  patients = unique(data_permutado$patient)
+  for(patient_i in patients){
+    
+    data_summary_cols_cv = data_permutado %>%
+      filter(patient != patient_i)
+    # pega o fold para cada patient:
+    foldid_p = 1 + ((order(data_summary_cols_cv$patient) - 1) %/% 10)
+    nfolds_p = max(foldid_p)
+    
+    XX = data_summary_cols_cv %>% 
+      model.matrix(fm, .)
+    
+    YY = data_summary_cols_cv %>% 
+      ungroup() %>% 
+      select(quiz_grade) %>% 
+      as.matrix()
+    
+    aux <- cv.glmnet(XX, YY, family = "binomial",
+                     keep = TRUE, nfolds = nfolds_p,
+                     foldid = foldid_p)
+    # i <- which(aux$lambda == aux$lambda.min)
+    
+    data_summary_cols_test = data_permutado %>%
+      filter(patient == patient_i)
+    
+    XX = data_summary_cols_test %>% 
+      model.matrix(fm, .)
+    
+    YY = data_summary_cols_test %>% 
+      ungroup() %>% 
+      select(quiz_grade) %>% 
+      as.matrix()
+    
+    result = c(result, predict(aux, XX, type = "response"))
+  }
   
-  roc <- prediction(aux$fit.preval[,i], data_permutado$quiz_grade)
-  permutacoes = read_rds("permutacoes_auc.rds")
+  roc <- prediction(result, data_permutado$quiz_grade)
+  permutacoes = read_rds("permutacoes_auc_glmnet.rds")
   permutacoes = c(permutacoes, 
                   performance(roc, measure = "auc")@y.values[[1]])
   print(n, performance(roc, measure = "auc")@y.values[[1]])
-  write_rds(permutacoes, "permutacoes_auc.rds")
+  write_rds(permutacoes, "permutacoes_auc_glmnet.rds")
+  
+  performance(roc, measure = "auc")
+  roc <- performance(roc, measure = "tpr", x.measure = "fpr")
+  data_roc_mean_glm <- tibble("espec" = roc@x.values[[1]],
+                              "sens" = roc@y.values[[1]],
+                              "method"   = "GLMNET")
+  data_roc_mean %<>% rbind(data_roc_mean_glm)
+  
+  
+  
+    
+  # data_permutado = data_summary_cols
+  # data_permutado$quiz_grade = sample(data_permutado$quiz_grade)
+  # 
+  # XX = model.matrix(quiz_grade~., data_permutado)
+  # YY = data_permutado %>% ungroup() %>% select(quiz_grade) %>% as.matrix()
+  # 
+  # aux <- cv.glmnet(XX, YY, family = "binomial",
+  #                  keep = TRUE, nfolds = nfolds_p,
+  #                  foldid = foldid_p)
+  # i <- which(aux$lambda == aux$lambda.min)
+  # coefficients(aux, s = aux$lambda.min)
+  # 
+  #   
+  # roc <- prediction(aux$fit.preval[,i], data_permutado$quiz_grade)
+  # permutacoes = read_rds("permutacoes_auc_glmnet.rds")
+  # permutacoes = c(permutacoes, 
+  #                 performance(roc, measure = "auc")@y.values[[1]])
+  # print(n, performance(roc, measure = "auc")@y.values[[1]])
+  # write_rds(permutacoes, "permutacoes_auc_glmnet.rds")
 }
 
-# write_rds(permutacoes_2, "permutacoes_auc.rds")
-verificacao = read_rds("permutacoes_auc.rds")
+# write_rds(permutacoes_2, "permutacoes_auc_glmnet.rds")
+verificacao = read_rds("permutacoes_auc_glmnet.rds")
 maior = verificacao
-maior[which(verificacao >= 0.6948618)]
+maior[which(verificacao >= 0.6340144)]
 length(verificacao)
 
 # Pegar os principais canais e montar o mapa dos principais.
@@ -393,61 +511,69 @@ length(verificacao)
 p_value = length(maior[which(verificacao >= 0.5)]) / length(verificacao)
 
 
-# write_rds(permutacoes_rf, "permutacoes_auc_rf.rds")
-
-
 ####################################
 # Teste Permutação - Random Forest #
 ####################################
 
-# write_rds(NULL, "permutacoes_auc_rf.rds")
+# write_rds(NULL, "permutacoes_auc_xx_rf.rds")
+# Já foi feito 90 simulações.
+
 for(n in 1:1000){
   
   data_permutado_rf = data_summary_cols
   data_permutado_rf$quiz_grade = sample(data_permutado_rf$quiz_grade)
   
-
-formula = quiz_grade~. 
-
-# Classificação usa fatores, regressão usa números reais, por isso
-# colocar em fator:
-ajuste = data_permutado_rf %>%
-  mutate(quiz_grade = as.numeric(quiz_grade)) %>% 
-  randomForest(formula, .)
-
-roc <- prediction(ajuste$predicted, data_permutado_rf$quiz_grade)
-performance(roc, measure = "auc")
-
-performance(roc, measure = "auc")@y.values[[1]]
-
-permutacoes_rf = read_rds("permutacoes_auc_rf.rds")
-
-permutacoes_rf = c(permutacoes_rf, 
-                   performance(roc, measure = "auc")@y.values[[1]])
-print(n, performance(roc, measure = "auc")@y.values[[1]])
-write_rds(permutacoes_rf, "permutacoes_auc_rf.rds")
-
-
-roc <- performance(roc, measure = "tpr", x.measure = "fpr")
-data_roc_mean_rf <- tibble("espec" = roc@x.values[[1]],
-                           "sens" = roc@y.values[[1]],
-                           "method"   = "RF")
-data_roc_mean %<>% rbind(data_roc_mean_rf)
+  formula = quiz_grade~. 
+  
+  result = NULL
+  patients = unique(data_permutado_rf$patient)
+  for(patient_i in patients){
+    data_summary_cols_cv = data_permutado_rf %>% 
+      filter(patient != patient_i)
+    ajuste = data_summary_cols_cv %>%
+      mutate(quiz_grade = as.numeric(quiz_grade)) %>% 
+      randomForest(formula, .)
+    data_summary_cols_test = data_permutado_rf %>% 
+      filter(patient == patient_i)
+    result = c(result,
+               predict(ajuste, data_summary_cols_test))
+  }
+  
+  roc <- prediction(result, data_permutado_rf$quiz_grade)
+  performance(roc, measure = "auc")
+  
+  performance(roc, measure = "auc")@y.values[[1]]
+  
+  permutacoes_rf = read_rds("permutacoes_auc_xx_rf.rds")
+  permutacoes_rf = c(permutacoes_rf,
+                     performance(roc, measure = "auc")@y.values[[1]])
+  print(n, performance(roc, measure = "auc")@y.values[[1]])
+  write_rds(permutacoes_rf, "permutacoes_auc_xx_rf.rds")
+  
+  roc <- performance(roc, measure = "tpr", x.measure = "fpr")
+  data_roc_mean_rf <- tibble("espec" = roc@x.values[[1]],
+                             "sens" = roc@y.values[[1]],
+                             "method"   = "RF")
+  data_roc_mean %<>% rbind(data_roc_mean_rf)
 }
 
 
-verificacao = read_rds("permutacoes_auc_rf.rds")
+verificacao = read_rds("permutacoes_auc_xx_rf.rds")
 maior = verificacao
-maior[which(verificacao >= 0.6819411)]
-length(maior[which(verificacao >= 0.6819411)])
+maior[which(verificacao >= 0.654)]
+length(maior[which(verificacao >= 0.654)])
 length(verificacao)
-p_value = length(maior[which(verificacao >= 0.6819411)]) / length(verificacao)
+p_value = length(maior[which(verificacao >= 0.654)]) / length(verificacao)
 p_value
 
 
 ######################
 # SVM                #
 ######################
+
+# Implementação desse treco:
+# 1) Ver se faz sentido
+# 2) Implementar
 
 data_summary_cols %<>% arrange(patient)
 
