@@ -9,6 +9,8 @@ library(rpart.plot)
 library(plotly)
 library(e1071)
 library(caret)
+library(gmodels)
+
 
 ###############################
 # Pre-processamento dos dados #
@@ -33,7 +35,7 @@ all_data %<>%
 
 # Dados extraídos da série temporal
 data_summary = all_data %>%
-  # Retirar ids: se der 4, 9, 13. Pior mesmo era o 14
+  # Retirar ids: se der 4, 9, 13 e 14. Pior mesmo era o 14
   filter(!(patient %in% c(14))) %>%
   filter(!is.na(oxy) & !is.na(deoxy)) %>%
   group_by(patient, video, channel) %>%
@@ -148,8 +150,44 @@ for(patient_i in patients){
                           data_summary_cols_test,
                           type = "response"))
 }
+
+# Matriz de prob pra salvar e fazer boxplot depois
+# write_excel_csv(as.data.frame(result_type), "RF_prob.csv")
+
+
+
+# A partir da espec = sensbilidade, determina corte de acertos
 result_class = as.factor(result_type > 0.705)
 reference = as.factor(data_summary_cols$quiz_grade > 0.705)
+
+# Matriz com previsões de acertos e erros para cada pessoa e questão
+# a partir do corte sens = espec
+result_rf_class = matrix(NA, nrow = 18, ncol = 10)
+for(ii in 1:18)
+{
+  for(jj in 1:10)
+  {
+    result_rf_class[ii, jj] = result_class[10*(ii-1) + jj]
+  }
+}
+# gambi pra transformar os dados em 0 e 1 
+# (problemas R-ísticos de factor em matriz)
+result_rf_class = result_rf_class-1
+
+# write_excel_csv(as.data.frame(result_rf_class), "RF_predicao.csv")
+aux_true = result_class[which(reference == "TRUE")] == "TRUE"
+B = 10^4
+boot_sens = rep(NA, B)
+for(ii in 1:B) boot_sens[ii] = mean(sample(aux_true, length(aux_true), replace = TRUE))
+mean(boot_sens)
+sd(boot_sens)
+
+aux_false = result_class[which(reference == "FALSE")] == "FALSE"
+B = 10^4
+boot_spec = rep(NA, B)
+for(ii in 1:B) boot_spec[ii] = mean(sample(aux_false, length(aux_false), replace = TRUE))
+mean(boot_spec)
+sd(boot_spec)
 
 confusionMatrix(result_class, reference, dnn = c("result", "quiz_grade"))
 
@@ -178,9 +216,9 @@ p  <- plot_ly(
   )
 p
 
-######################
+#######################
 # Regressao Logistica #
-######################
+#######################
 data_summary_cols %<>% arrange(patient)
 fm = quiz_grade ~. 
 
@@ -255,10 +293,48 @@ for(patient_i in patients){
 # colMeans(erros) # erros preditos dos pacientes: piores sao 4, 9 e 13
 # rowMeans(erros) # questoes que o modelo é pior: 2, 3, 7, 8
 
+# Matriz de prob pra salvar e fazer boxplot depois
+# write_excel_csv(as.data.frame(result), "GLMNET_prob.csv")
+
+
 limiar = 0.7225
 result_class = as.factor(result > limiar)
 reference = as.factor(data_summary_cols$quiz_grade > limiar)
+
+aux_true = result_class[which(reference == "TRUE")] == "TRUE"
+B = 10^4
+boot_sens = rep(NA, B)
+for(ii in 1:B) boot_sens[ii] = mean(sample(aux_true, length(aux_true), replace = TRUE))
+mean(boot_sens)
+sd(boot_sens)
+
+aux_false = result_class[which(reference == "FALSE")] == "FALSE"
+B = 10^4
+boot_spec = rep(NA, B)
+for(ii in 1:B) boot_spec[ii] = mean(sample(aux_false, length(aux_false), replace = TRUE))
+mean(boot_spec)
+sd(boot_spec)
+
 confusionMatrix(result_class, reference, dnn = c("result", "quiz_grade"))
+
+
+# Matriz com previsões de acertos e erros para cada pessoa e questão
+# a partir do corte sens = espec
+result_glmnet_class = matrix(NA, nrow = 18, ncol = 10)
+for(ii in 1:18)
+{
+  for(jj in 1:10)
+  {
+    result_glmnet_class[ii, jj] = result_class[10*(ii-1) + jj]
+  }
+}
+# gambi pra transformar os dados em 0 e 1 
+# (problemas R-ísticos de factor em matriz)
+result_glmnet_class = result_glmnet_class-1
+
+# write_excel_csv(as.data.frame(result_glmnet_class), "GLMNET_predicao.csv")
+
+
 
 
 roc <- prediction(result, data_summary_cols$quiz_grade)
@@ -567,9 +643,84 @@ p_value = length(maior[which(verificacao >= 0.654)]) / length(verificacao)
 p_value
 
 
-######################
-# SVM                #
-######################
+#######################################
+# Comparacao expectativas vs modelo   #
+#######################################
+
+perc_tab = read_csv("percepcao_voluntario.csv")
+glm_tab = read_csv("GLMNET_predicao.csv")
+glm_prob_tab = read_csv("GLMNET_prob_asmatrix.csv")
+rf_tab = read_csv("RF_predicao.csv")
+rf_prob_tab = read_csv("RF_prob_asmatrix.csv")
+
+glm_df = glm_tab %>% 
+  as.data.frame() %>% 
+  gather("questao", "pred_glm") %>% 
+  mutate(ind = rep(1:18, 10),
+         questao = gsub("V", "", questao))
+
+glm_prob_df = glm_prob_tab %>% 
+  as.data.frame() %>% 
+  gather("questao", "prob_glm") %>% 
+  mutate(ind = rep(1:18, 10),
+         questao = gsub("V", "", questao))
+
+rf_df = rf_tab %>% 
+  as.data.frame() %>% 
+  gather("questao", "pred_rf") %>% 
+  mutate(ind = rep(1:18, 10),
+         questao = gsub("V", "", questao))
+
+rf_prob_df = rf_prob_tab %>% 
+  as.data.frame() %>% 
+  gather("questao", "prob_rf") %>% 
+  mutate(ind = rep(1:18, 10),
+         questao = gsub("V", "", questao))
+rf_prob_df$prob_rf[rf_prob_df$prob_rf > 1] =
+  rf_prob_df$prob_rf[rf_prob_df$prob_rf > 1]/1000
+
+perc_df = perc_tab[1:18,-c(1:2)] %>% 
+  as.data.frame() %>% 
+  gather("questao", "perc") %>% 
+  mutate(ind = rep(1:18, 10))
+
+full_df = glm_df %>% 
+  inner_join(rf_df) %>% 
+  inner_join(perc_df)
+
+CrossTable(full_df$pred_rf, full_df$perc)
+CrossTable(full_df$pred_glm, full_df$perc)
+
+inner_join(rf_prob_df, perc_df) %>% 
+  mutate(perc = as.factor(perc)) %>% 
+  ggplot(aes(x = perc, y = prob_rf)) +
+  geom_boxplot()
+
+inner_join(glm_prob_df, perc_df) %>% 
+  mutate(perc = as.factor(perc)) %>% 
+  ggplot(aes(x = perc, y = prob_glm)) +
+  geom_boxplot()
+
+
+# Comparando os grupos RF
+inner_join(rf_prob_df, perc_df) %>% 
+  filter(perc != 0.5) %>% 
+  mutate(perc = as.factor(perc)) %>%
+  lm(prob_rf ~ perc, data = .) %>% 
+  summary()
+
+# Comparando os grupos GLMNET
+inner_join(glm_prob_df, perc_df) %>% 
+  #filter(perc != 0.5) %>% 
+  mutate(perc = as.factor(perc)) %>%
+  lm(prob_glm ~ perc, data = .) %>% 
+  summary()
+
+
+
+#########################
+# SVM nunca terminado   #
+#########################
 
 # Implementação desse treco:
 # 1) Ver se faz sentido
